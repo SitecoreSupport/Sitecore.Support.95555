@@ -1,13 +1,15 @@
-﻿using System.Collections.Generic;
-
-using Sitecore.Caching.Generics;
-using Sitecore.Diagnostics;
-
-namespace Sitecore.ContentSearch.Pipelines.GetContextIndex
+﻿namespace Sitecore.Support.ContentSearch.Pipelines.GetContextIndex
 {
+  using System.Collections.Generic;
   using System.Linq;
+  using Sitecore.Caching.Generics;
   using Sitecore.ContentSearch.Abstractions;
+  using Sitecore.Data.Items;
+  using Sitecore.Diagnostics;
   using Sitecore.Reflection;
+  using Sitecore.SecurityModel;
+  using Sitecore.ContentSearch.Pipelines.GetContextIndex;
+  using Sitecore.ContentSearch;
 
   /// <summary>
   /// The <see cref="FetchIndex"/> class.
@@ -54,10 +56,26 @@ namespace Sitecore.ContentSearch.Pipelines.GetContextIndex
         return null;
       }
 
-      var indexes = from searchIndex in ContentSearchManager.Indexes
-                    from providerCrawler in searchIndex.Crawlers
-                    where !providerCrawler.IsExcludedFromIndex(indexable)
-                    select searchIndex;
+      List<ISearchIndex> includedIndexes = new List<ISearchIndex>();
+      AbstractSearchIndex tempIndex;
+
+      foreach (var searchIndex in ContentSearchManager.Indexes)
+      {
+        tempIndex = searchIndex as AbstractSearchIndex;
+
+        if ((tempIndex == null) &&
+            searchIndex.Crawlers.Any(c => !c.IsExcludedFromIndex(indexable)))
+        {
+          includedIndexes.Add(searchIndex);
+        }
+      }
+
+      var indexes = includedIndexes.AsEnumerable();
+
+      if (!indexes.Any())
+      {
+        indexes = this.FindIndexesRelatedToIndexable(args.Indexable, ContentSearchManager.Indexes);
+      }
 
       // ReSharper disable once PossibleMultipleEnumeration
       var rankedIndexes = RankContextIndexes(indexes, indexable);
@@ -93,8 +111,32 @@ namespace Sitecore.ContentSearch.Pipelines.GetContextIndex
       }
 
       // Return the one that matches the default type ..
-      var matchedIndex = searchIndices.Where(i => i.GetType() == defaultType).OrderBy(i => i.First.Name).ToArray();
+      var matchedIndex = searchIndices.Where(i => i.First.GetType() == defaultType).OrderBy(i => i.First.Name).ToArray();
       return matchedIndex.Any() ? matchedIndex[0].First.Name : searchIndices[0].First.Name;
+    }
+
+    protected virtual IEnumerable<ISearchIndex> FindIndexesRelatedToIndexable(IIndexable indexable, IEnumerable<ISearchIndex> indexes)
+    {
+      SitecoreIndexableItem sitecoreIndexableItem = indexable as SitecoreIndexableItem;
+
+      if (sitecoreIndexableItem == null)
+      {
+        return new List<ISearchIndex>();
+      }
+
+      Item item = sitecoreIndexableItem.Item;
+
+      using (new SecurityDisabler())
+      {
+        using (new WriteCachesDisabler())
+        {
+          return indexes
+              .Where(i => i.Crawlers.OfType<SitecoreItemCrawler>()
+                  .Where(crawler => crawler.RootItem != null)
+                  .Any(crawler => item.Database.Name.Equals(crawler.Database, System.StringComparison.InvariantCultureIgnoreCase)
+                                  && item.Paths.LongID.StartsWith(crawler.RootItem.Paths.LongID, System.StringComparison.InvariantCulture)));
+        }
+      }
     }
 
     /// <summary>Ranks the context indexes.</summary>
